@@ -1,1 +1,6 @@
+#ignoring venv (I called it data lol)
 data/
+#ignoring dataset files (sensitive)
+processedData/
+#ignoring opensky API crendential (of course duh)
+credentials.json
