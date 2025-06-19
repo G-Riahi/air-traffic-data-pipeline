@@ -4,3 +4,5 @@ data/
 processedData/
 #ignoring opensky API crendential (of course duh)
 credentials.json
+
+notebooks/artifacts/
