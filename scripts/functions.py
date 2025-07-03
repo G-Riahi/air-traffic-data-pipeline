@@ -182,7 +182,9 @@ def genCoords(airportLat, airportLon, stepDist, stepNumber):
         "lamax": max(lats), 
         "lomax": max(lons)  
     }
-    return product(lats, lons), params
+    coord_sets = [set(coord) for coord in product(lats, lons)]
+
+    return coord_sets, params
 
 
 #Nantes Airport coordinates in degrees:
@@ -208,3 +210,41 @@ def distance(grLat, grLon, plLat, plLon):
 
     # Pythagores
     return math.sqrt((horDist**2)+(verDist**2))
+
+def decibelEstimationSource(spark, df):
+    a = df.select('longitude', 'latitude', 'on_ground', 'vertical_rate')
+    dataset = a.collect()
+    currentDecibels = {}
+    for i in dataset:
+        if i['on_ground']==True:
+            currentDecibels[(i['latitude'], i['longitude'])] = 80
+        else:
+            if i['vertical_rate']<-1.5:
+                currentDecibels[(i['latitude'], i['longitude'])] = 110
+            elif i['vertical_rate']>1.5:
+                currentDecibels[(i['latitude'], i['longitude'])] = 130
+            else:
+                currentDecibels[(i['latitude'], i['longitude'])] = 90
+    return currentDecibels
+
+def combine_decibels(decibel_list):
+    if not decibel_list:
+        return 0
+    total = sum(10 ** (d / 10) for d in decibel_list)
+    return round(10 * math.log10(total), 2)
+
+def decibelEstimationGround(dfSource, coordinates):
+    decibelsList = {}
+
+    for (lat, lon), i0 in dfSource.items():
+        for (i, j) in coordinates:
+            if abs(i - lat) > 0.18 or abs(j - lon) > 0.246:
+                continue
+
+            dist = max(distance(i, j, lat, lon), 1e-3)
+            sourceDecibel = i0 - 20 * math.log10(dist)
+
+            if sourceDecibel >= 30:
+                decibelsList.setdefault((i, j), []).append(sourceDecibel)
+
+    return {coord: combine_decibels(vals) for coord, vals in decibelsList.items()}
