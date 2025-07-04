@@ -2,6 +2,7 @@ import requests
 import json
 import time
 import math
+import sys
 import pandas as pd
 from itertools import product
 from pyspark.sql import SparkSession, functions as F, types as T
@@ -58,6 +59,13 @@ def getFlightData(credFile, params):
 
         # Read JSON from RDD
         df = spark.read.json(rdd)
+
+        if data.get("states") is None:          # None → empty list
+            data["states"] = []
+
+        if not data["states"]:                  # still empty? nothing to process
+            print("No aircraft in the selected area.")
+            sys.exit(0)                         # or `return` inside a function
 
         df_states = df.withColumn("state", F.explode("states"))
 
@@ -212,19 +220,19 @@ def distance(grLat, grLon, plLat, plLon):
     return math.sqrt((horDist**2)+(verDist**2))
 
 def decibelEstimationSource(spark, df):
-    a = df.select('longitude', 'latitude', 'on_ground', 'vertical_rate')
+    a = df.select('longitude', 'latitude', 'on_ground', 'vertical_rate', 'geo_altitude')
     dataset = a.collect()
     currentDecibels = {}
     for i in dataset:
         if i['on_ground']==True:
-            currentDecibels[(i['latitude'], i['longitude'])] = 80
+            currentDecibels[(i['latitude'], i['longitude'])] = [80, 27]
         else:
             if i['vertical_rate']<-1.5:
-                currentDecibels[(i['latitude'], i['longitude'])] = 110
+                currentDecibels[(i['latitude'], i['longitude'])] = [110, i['geo_altitude']]
             elif i['vertical_rate']>1.5:
-                currentDecibels[(i['latitude'], i['longitude'])] = 130
+                currentDecibels[(i['latitude'], i['longitude'])] = [130, i['geo_altitude']]
             else:
-                currentDecibels[(i['latitude'], i['longitude'])] = 90
+                currentDecibels[(i['latitude'], i['longitude'])] = [90, i['geo_altitude']]
     return currentDecibels
 
 def combine_decibels(decibel_list):
@@ -238,11 +246,14 @@ def decibelEstimationGround(dfSource, coordinates):
 
     for (lat, lon), i0 in dfSource.items():
         for (i, j) in coordinates:
-            if abs(i - lat) > 0.18 or abs(j - lon) > 0.246:
-                continue
+            '''if abs(i - lat) > 0.18 or abs(j - lon) > 0.246:
+                continue'''
 
-            dist = max(distance(i, j, lat, lon), 1e-3)
-            sourceDecibel = i0 - 20 * math.log10(dist)
+            dist = distance(i, j, lat, lon, i0[1])
+            if dist>20000:
+                continue
+            
+            sourceDecibel = i0[0] - 20 * math.log10(dist)
 
             if sourceDecibel >= 30:
                 decibelsList.setdefault((i, j), []).append(sourceDecibel)
