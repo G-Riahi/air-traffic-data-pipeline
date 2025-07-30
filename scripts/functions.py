@@ -1,14 +1,11 @@
 import requests
 import json
 import time
-import math
 import sys
 import folium
-import pandas as pd
 import numpy as np
 from folium import Element
 from folium.plugins import HeatMap
-from itertools import product
 from pyspark.sql import SparkSession, functions as F, types as T
 
 
