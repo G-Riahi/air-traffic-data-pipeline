@@ -3,7 +3,11 @@ import json
 import time
 import math
 import sys
+import folium
 import pandas as pd
+import numpy as np
+from folium import Element
+from folium.plugins import HeatMap
 from itertools import product
 from pyspark.sql import SparkSession, functions as F, types as T
 
@@ -126,73 +130,62 @@ def getFlightData(credFile, params):
 #        "lomax": -1.181750  
 #    }   ---> example
 
-def stepslat(lat, lon, d, R, num):
-    coLat_rad = math.radians(lat)
-    coLon_rad = math.radians(lon)
+EARTH_RAD = 6371000.0
+R_MAX     = 20000.0        # m radius cut-off
+REF_ALT   = 27.0            # m, ground reference altitude
 
-    bearing_north = math.radians(0)
-    bearing_south = math.radians(180)
+def stepslat(lat_deg, step_m, n_steps):
+    """
+    Latitude rings around `lat_deg` (decimal°) up to ±n_steps·step_m metres.
+    Returns a 1-D NumPy array sorted south→north, length 2·n_steps+1.
+    """
+    lat0 = np.radians(lat_deg)
 
-    coords = [coLat_rad]
+    # i = −n … 0 … +n  →   δ = i·step_m / R   (signed angular distance, radians)
+    i = np.arange(-n_steps, n_steps + 1)
+    delta = i * step_m / EARTH_RAD
 
-    temp1, temp2 = coLat_rad, coLat_rad
-    for i in range(0,num):
-        temp1 = math.asin(math.sin(temp1) * math.cos(d / R) +
-                            math.cos(temp1) * math.sin(d / R) * math.cos(bearing_north))
-        temp2 = math.asin(math.sin(temp2) * math.cos(d / R) +
-                            math.cos(temp2) * math.sin(d / R) * math.cos(bearing_south))
-        
-        coords.append(temp1)
-        coords.append(temp2)
-
-    coords.sort()
-    return [math.degrees(i) for i in coords]
+    # due north/south: bearing = 0° or 180°, so cos(bearing)=±1 → sign handled by i
+    phi = lat0 + delta                          # exact for a meridian track
+    return np.degrees(phi)
 
 
-def stepslong(lat, lon, d, R, num_steps):
-    lat_rad = math.radians(lat)
-    lon_rad = math.radians(lon)
-    
-    bearing_east = math.radians(90)
-    bearing_west = math.radians(270)
+def stepslong(lat_deg, lon_deg, step_m, n_steps):
+    """
+    Longitude rings around (`lat_deg`, `lon_deg`) up to ±n_steps·step_m metres.
+    Returns a 1-D NumPy array sorted west→east, length 2·n_steps+1.
+    """
+    lat0 = np.radians(lat_deg)
+    lon0 = np.radians(lon_deg)
 
-    coords = [lon_rad]
-    
-    temp_east = lon_rad
-    temp_west = lon_rad
-    
-    for i in range(num_steps):
-        delta = math.atan2(
-            math.sin(bearing_east) * math.sin(d / R) * math.cos(lat_rad),
-            math.cos(d / R) - math.sin(lat_rad) * math.sin(lat_rad)
-        )
-        temp_east += delta
-        coords.append(temp_east)
-        
-        delta = math.atan2(
-            math.sin(bearing_west) * math.sin(d / R) * math.cos(lat_rad),
-            math.cos(d / R) - math.sin(lat_rad) * math.sin(lat_rad)
-        )
-        temp_west += delta
-        coords.append(temp_west)
-
-    coords.sort()
-    return [math.degrees(i) for i in coords]
+    # metres→radians in longitude shrinks by cos(latitude)
+    metres_per_rad_lon = EARTH_RAD * np.cos(lat0)
+    i = np.arange(-n_steps, n_steps + 1)
+    lmbda = lon0 + i * (step_m / metres_per_rad_lon)
+    return np.degrees(lmbda)
 
 
-def genCoords(airportLat, airportLon, stepDist, stepNumber): 
-    earthRad = 6371000
-    lats = stepslat(airportLat, airportLon, stepDist, earthRad, stepNumber)
-    lons = stepslong(airportLat, airportLon, stepDist, earthRad, stepNumber)
+def genCoords(airport_coords, step_dist, step_number):
+    """
+    Returns
+    -------
+    coords      : (M, 2) ndarray of [lat, lon] pairs (M = (2n+1)²)
+    params      : dict  – {'lamin', 'lomin', 'lamax', 'lomax'}
+    """
+    lats = stepslat(airport_coords['Latitude'], step_dist, step_number)
+    lons = stepslong(airport_coords['Latitude'], airport_coords['Longitude'], step_dist, step_number)
+
+    # full latitude/longitude grid in one call
+    lon_grid, lat_grid = np.meshgrid(lons, lats)        # shapes (2n+1, 2n+1)
+    coords = np.column_stack([lat_grid.ravel(), lon_grid.ravel()])
+
     params = {
-        "lamin": min(lats),
-        "lomin": min(lons), 
-        "lamax": max(lats), 
-        "lomax": max(lons)  
+        "lamin": float(lats[0]),        # already sorted S→N, W→E
+        "lomin": float(lons[0]),
+        "lamax": float(lats[-1]),
+        "lomax": float(lons[-1]),
     }
-    coord_sets = [set(coord) for coord in product(lats, lons)]
-
-    return coord_sets, params
+    return coords, params
 
 
 #Nantes Airport coordinates in degrees:
@@ -201,23 +194,24 @@ Nantes = {
     'Longitude':    -1.6044
 }
 
-def distance(grLat, grLon, plLat, plLon):
-    R = 6371000
-
-    # Calculating horizental distance using the haversine_distance
-    radCoLat, radPlLat= math.radians(grLat), math.radians(plLat)
-    deltaLat = math.radians(grLat - plLat)
-    deltaLon = math.radians(grLon - plLon)
-
-    a = math.sin(deltaLat/2) ** 2
-    b = math.cos(radCoLat) * math.cos(radPlLat) * (math.sin(deltaLon/2) ** 2)
-    horDist = 2 * R * math.asin(math.sqrt(a+b))
-
-    # Calculating vertical distance, simple because variables in meters not degrees
-    verDist = abs(2461.26 - 27)
-
-    # Pythagores
-    return math.sqrt((horDist**2)+(verDist**2))
+def distance(gr_lat, gr_lon, pl_lat, pl_lon, alt):
+    """
+    All inputs are NumPy arrays **or** scalars that broadcast.
+    Returns an array of 3-D distances in metres.
+    """
+    # Convert to radians in one shot
+    gr_lat_rad = np.radians(gr_lat)
+    pl_lat_rad = np.radians(pl_lat)
+    
+    d_lat = gr_lat_rad - pl_lat_rad
+    d_lon = np.radians(gr_lon - pl_lon)
+    
+    a = np.sin(d_lat / 2.0)**2
+    b = np.cos(gr_lat_rad) * np.cos(pl_lat_rad) * np.sin(d_lon / 2.0)**2
+    hor_dist = 2.0 * EARTH_RAD * np.arcsin(np.sqrt(a + b))
+    
+    ver_dist = np.abs(alt - 27)           # works element-wise
+    return np.sqrt(hor_dist**2 + ver_dist**2)
 
 def decibelEstimationSource(spark, df):
     a = df.select('longitude', 'latitude', 'on_ground', 'vertical_rate', 'geo_altitude')
@@ -235,27 +229,105 @@ def decibelEstimationSource(spark, df):
                 currentDecibels[(i['latitude'], i['longitude'])] = [90, i['geo_altitude']]
     return currentDecibels
 
-def combine_decibels(decibel_list):
-    if not decibel_list:
-        return 0
-    total = sum(10 ** (d / 10) for d in decibel_list)
-    return round(10 * math.log10(total), 2)
+def haversine_matrix(lat_a, lon_a, lat_b, lon_b):
+    """
+    All inputs are 1-D arrays in *radians*.
+    Returns an (len(a), len(b)) matrix of great-circle distances in metres.
+    """
+    dlat = lat_a[:, None] - lat_b[None, :]
+    dlon = lon_a[:, None] - lon_b[None, :]
+    a = np.sin(dlat/2)**2 + np.cos(lat_a[:,None])*np.cos(lat_b[None,:])*np.sin(dlon/2)**2
+    return 2*EARTH_RAD*np.arcsin(np.sqrt(a))
 
-def decibelEstimationGround(dfSource, coordinates):
-    decibelsList = {}
+def decibel_estimation_ground(df_source, coordinates):
+    # -------- source columns → NumPy --------------------------------------
+    src_lat, src_lon, src_db, src_alt = map(
+        np.asarray,
+        zip(*[(la, lo, db_alt[0], db_alt[1]) for (la, lo), db_alt in df_source.items()])
+    )
+    # -------- ground pixels ------------------------------------------------
+    g_lat, g_lon = map(np.asarray, zip(*coordinates))
 
-    for (lat, lon), i0 in dfSource.items():
-        for (i, j) in coordinates:
-            '''if abs(i - lat) > 0.18 or abs(j - lon) > 0.246:
-                continue'''
+    # radians once
+    src_lat_rad = np.radians(src_lat)
+    src_lon_rad = np.radians(src_lon)
+    g_lat_rad   = np.radians(g_lat)
+    g_lon_rad   = np.radians(g_lon)
 
-            dist = distance(i, j, lat, lon, i0[1])
-            if dist>20000:
-                continue
-            
-            sourceDecibel = i0[0] - 20 * math.log10(dist)
+    # -------- distance matrix (|G|×|S|) -----------------------------------
+    dist = haversine_matrix(g_lat_rad, g_lon_rad, src_lat_rad, src_lon_rad)
 
-            if sourceDecibel >= 30:
-                decibelsList.setdefault((i, j), []).append(sourceDecibel)
+    # discard far sources
+    mask = dist <= R_MAX
+    if not mask.any():
+        return {}
 
-    return {coord: combine_decibels(vals) for coord, vals in decibelsList.items()}
+    # inverse-square law in dB
+    db_loss   = 20*np.log10(dist, where=mask, out=np.zeros_like(dist))  # avoid log10(0) warnings
+    contrib   = np.where(mask, src_db - db_loss, 0)                     # dB SPL at ground
+
+    # -------- combine in power domain -------------------------------------
+    #  P_total = Σ 10^(dB/10)   →   dB_total = 10 log10(P_total)
+    power     = np.where(mask, 10**(contrib/10), 0)
+    sum_power = power.sum(axis=1)
+
+    out_db    = np.round(10*np.log10(sum_power, where=sum_power>0), 2)
+    valid     = sum_power > 0
+
+    # -------- build the (lat,lon) → dB dict -------------------------------
+    return { (float(g_lat[i]), float(g_lon[i])): float(out_db[i])
+             for i in np.where(valid)[0] }
+
+
+#------------------------ test -------------------------------------------
+
+coords, bounds = genCoords(Nantes, 200, 500)
+
+spark, df_typed = getFlightData('/home/gesser/air-traffic-data-pipeline/credentials.json', bounds)
+
+test = decibel_estimation_ground(decibelEstimationSource(spark, df_typed), coords)
+
+center_lat = (bounds['lamin'] + bounds['lamax']) / 2
+center_lon = (bounds['lomin'] + bounds['lomax']) / 2
+
+m = folium.Map(location=[center_lat, center_lon], zoom_start=11)
+
+corners = [
+    [bounds['lamin'], bounds['lomin']],
+    [bounds['lamin'], bounds['lomax']],
+    [bounds['lamax'], bounds['lomax']],
+    [bounds['lamax'], bounds['lomin']],
+    [bounds['lamin'], bounds['lomin']]
+]
+
+folium.PolyLine(corners, color='red', weight=3).add_to(m)
+
+heat_data = [[lat, lon, db / 130] for (lat, lon), db in test.items()]  # Normalize to 0–1 range
+
+HeatMap(
+    heat_data,
+    radius=15,
+    blur=25,
+    max_zoom=13,
+    max_opacity=0.3,
+).add_to(m)
+
+
+legend_html = """
+<div style="
+    position: fixed; 
+    bottom: 50px; left: 50px; width: 180px; height: 120px; 
+    background-color: rgba(255, 255, 255, 0.8);
+    border:2px solid grey; z-index:9999; font-size:14px;
+    padding: 10px; box-shadow: 2px 2px 5px rgba(0,0,0,0.3);">
+    <b>Heatmap Intensity</b><br>
+    <i style="background:blue; width: 18px; height: 10px; display:inline-block;"></i> Low<br>
+    <i style="background:orange; width: 18px; height: 10px; display:inline-block;"></i> Medium<br>
+    <i style="background:red; width: 18px; height: 10px; display:inline-block;"></i> High<br>
+</div>
+"""
+m.get_root().html.add_child(Element(legend_html))
+
+m.save("/home/gesser/air-traffic-data-pipeline/test_maps/dec_flight_heat_map.html")
+
+spark.stop()
