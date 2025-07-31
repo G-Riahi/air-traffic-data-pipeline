@@ -4,7 +4,7 @@
 
 - [Goal and motivation](#goal-and-motivation)
 - [Requirements](#requirements)
-- [Data source]()
+- [Data source](#data-source)
 
 ## Goal and motivation
 
@@ -41,3 +41,46 @@ The relevant information provided by the API for this project includes:
 - **geo_altitude**: The geometric altitude of the aircraft (in meters above sea level)
 
 > This data is collected from OpenSky's REST API via HTTP requests using the `requests` library in Python and stored for decibel estimation.
+
+## Pipeline architechture
+
+## 📊 Pipeline Flow Diagram
+
+```text
+                    +----------------------+
+                    |  Airport Coordinates |
+                    +----------+-----------+
+                               |
+                               v
+                        +-------------+
+                        | Generate Grid |
+                        +------+------+
+                               |
+           +-------------------+-------------------+
+           |                                       |
+           v                                       |
+  +-----------------+                              |
+  |   OpenSky API   |                              |
+  +--------+--------+                              |
+           |                                       |
+           v                                       |
+  +-----------------------------+                  |
+  | Extract Relevant Flight Data|                  |
+  +-----------------------------+                  |
+           |                                       |
+           v                                       |
+  +---------------------------------------------+  |
+  | Estimate Source-Level Decibels Based on     |  |
+  | Aircraft Status (Takeoff, Landing, Cruise)  |  |
+  +-----------------------------+---------------+  |
+                                |                  |
+                                v                  v
+        +-----------------------------------------------+
+        | Estimate Ground-Level Decibels Using Grid and |
+        |    Source Aircraft Sound Level Estimations    |
+        +-----------------------------+-----------------+
+                                      |
+                                      v
+                       +---------------------------+
+                       |   Generate HTML Heatmap   |
+                       +---------------------------+
